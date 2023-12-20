@@ -1,4 +1,5 @@
 #include "common.hpp"
+#include "vector"
 
 /* Here is the list of functions describing the behaviour of each module, except in() and out() defined in common.cpp */
 
@@ -17,10 +18,10 @@ void M(const int src, const int dst, int threadSize, const int rank, MPI_Comm co
     int xarr[STREAM_ELEMENT_SIZE] = {0}; // Represents the full input array of one streamelement.
     // The sub_arr is used to distrubute the needed values for all threads
     // which they will calculate on.
-    int *sub_arr = new int[elem_per_process];
+    int *sub_arr = nullptr;
 
     // Sub_res stores the calculated values of an individual thread.
-    int *sub_res = new int[elem_per_process];
+    int *sub_res = nullptr;
     // The individual resultts are combined into this result array.
     int result[STREAM_ELEMENT_SIZE] = {0};
 
@@ -29,8 +30,11 @@ void M(const int src, const int dst, int threadSize, const int rank, MPI_Comm co
     int comSize;
     MPI_Comm_rank(comm_map, &currRank);
     MPI_Comm_size(comm_map, &comSize);
-
+    const int scatSize = (currRank < comSize - 1) ? elem_per_process : (elem_per_process + extra_elem_last_thread);
+    sub_arr = new int[scatSize];
+    sub_res = new int[scatSize];
     while (true) {
+        printf("I AM RANK: %d", currRank);
         // currRank 0 will always be the rank 1 in MPI_COMM_WORLD
         // so this one will be able to send and receive from src and dst.
         // And will also make sure that every other thread is synced up to recceive
@@ -56,24 +60,30 @@ void M(const int src, const int dst, int threadSize, const int rank, MPI_Comm co
                 return;
             }
         }
+        std::vector<int> sendcounts(comSize);
+        std::vector<int> displs(comSize);
+        for (int i = 0; i < scatSize; ++i) {
+            sendcounts[i] = (i < comSize - 1) ? elem_per_process : (elem_per_process + extra_elem_last_thread);
+            displs[i] = (i == 0) ? 0 : (displs[i - 1] + sendcounts[i - 1]);
+    }
 
         // Split array of x's values into smaller sub-arrays to calculate the values in parallel.
-        MPI_Scatter(xarr, elem_per_process, MPI_INT, sub_arr, elem_per_process, MPI_INT, 0, comm_map);
+        
+        MPI_Scatterv(xarr, sendcounts.data(), displs.data(), MPI_INT, sub_arr, scatSize, MPI_INT, 0, comm_map);
 
         // Calculate values and store them in sub_res, each thread has it's own sub_res array which correlates with a portion of the xarr array.
-        for (int j = 0; j < elem_per_process; j++) {
+        for (int j = 0; j < scatSize; j++) {
             sub_res[j] = j1(h1(g1(f1(sub_arr[j]))));
         }
 
         // Merge all the threads arrays into result, placing the calculated data at the correct indexes
         // in the result array.
-        MPI_Gather(sub_res, elem_per_process, MPI_INT, result, elem_per_process, MPI_INT, 0, comm_map);
-
+        
+        
+        MPI_Gatherv(sub_res, scatSize, MPI_INT, result, sendcounts.data(), displs.data(), MPI_INT, 0, comm_map);
+        
         // In the cases where STREAM_ELEMENT_SIZE is an odd number we calculate the remainder sequentially
         if (currRank == 0) {
-            for (int j = STREAM_ELEMENT_SIZE - extra_elem_last_thread; j < STREAM_ELEMENT_SIZE; ++j)
-                result[j] = j1(h1(g1(f1(x[j]))));
-
             for (int i = 0; i < STREAM_ELEMENT_SIZE; i++) {
                 x[i] = result[i];
             }
@@ -88,7 +98,7 @@ const int required_comm_size = 12;
 
 // This function maps each module to a distinct rank associated to a process (mind that each process is associated with exactly one module)
 void map_rank(const int rank) {
-    int threadSize = required_comm_size - 3;
+    int threadSize = required_comm_size - 2;
 
     // Create an own MPI_Comm for the map threads so that they can use their own comm for scatter and gather.
     MPI_Comm comm_map;
